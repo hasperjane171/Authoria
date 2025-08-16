@@ -484,3 +484,349 @@
     (get-license-config work-id LICENSE_TYPE_UNLIMITED)
   )
 )
+
+(define-constant ERR_INVALID_VERSION_NUMBER (err u113))
+(define-constant ERR_VERSION_NOT_FOUND (err u114))
+(define-constant ERR_INVALID_PARENT_WORK (err u115))
+(define-constant ERR_CIRCULAR_REFERENCE (err u116))
+(define-constant ERR_UNAUTHORIZED_VERSION (err u117))
+(define-constant ERR_INVALID_MODIFICATION_TYPE (err u118))
+
+(define-constant MODIFICATION_TYPE_REVISION u1)
+(define-constant MODIFICATION_TYPE_DERIVATIVE u2)
+(define-constant MODIFICATION_TYPE_TRANSLATION u3)
+(define-constant MODIFICATION_TYPE_ADAPTATION u4)
+(define-constant MODIFICATION_TYPE_COMPILATION u5)
+
+(define-data-var next-version-id uint u1)
+
+(define-map work-versions
+  { work-id: uint, version-number: uint }
+  {
+    version-id: uint,
+    author: principal,
+    content-hash: (buff 32),
+    modification-type: uint,
+    modification-description: (string-utf8 300),
+    timestamp: uint,
+    stacks-block-height: uint,
+    is-active: bool
+  }
+)
+
+(define-map work-version-count
+  { work-id: uint }
+  { count: uint }
+)
+
+(define-map derivative-works
+  { derivative-work-id: uint }
+  {
+    parent-work-id: uint,
+    derivative-type: uint,
+    attribution-percentage: uint,
+    derivation-description: (string-utf8 400),
+    registered-at: uint,
+    is-approved: bool
+  }
+)
+
+(define-map work-genealogy
+  { work-id: uint }
+  {
+    root-work-id: uint,
+    parent-work-id: uint,
+    generation-level: uint,
+    total-derivatives: uint,
+    lineage-path: (list 10 uint)
+  }
+)
+
+(define-map version-history
+  { author: principal, version-index: uint }
+  { version-id: uint }
+)
+
+(define-map author-version-count
+  { author: principal }
+  { count: uint }
+)
+
+(define-map work-timeline
+  { work-id: uint, timeline-index: uint }
+  {
+    event-type: uint,
+    version-id: uint,
+    timestamp: uint,
+    description: (string-utf8 200)
+  }
+)
+
+(define-map work-timeline-count
+  { work-id: uint }
+  { count: uint }
+)
+
+(define-public (create-work-version (work-id uint) (content-hash (buff 32)) (modification-type uint) (modification-description (string-utf8 300)))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) ERR_NOT_FOUND))
+      (author (get author work))
+      (version-id (var-get next-version-id))
+      (current-version-count (default-to u0 (get count (map-get? work-version-count { work-id: work-id }))))
+      (new-version-number (+ current-version-count u1))
+      (author-count (default-to u0 (get count (map-get? author-version-count { author: tx-sender }))))
+      (timeline-count (default-to u0 (get count (map-get? work-timeline-count { work-id: work-id }))))
+    )
+    (asserts! (is-eq tx-sender author) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (len content-hash) u32) ERR_INVALID_HASH)
+    (asserts! (and (>= modification-type u1) (<= modification-type u5)) ERR_INVALID_MODIFICATION_TYPE)
+    (asserts! (is-none (map-get? content-hash-to-work { content-hash: content-hash })) ERR_ALREADY_EXISTS)
+    
+    (map-set work-versions
+      { work-id: work-id, version-number: new-version-number }
+      {
+        version-id: version-id,
+        author: tx-sender,
+        content-hash: content-hash,
+        modification-type: modification-type,
+        modification-description: modification-description,
+        timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+        stacks-block-height: stacks-block-height,
+        is-active: true
+      }
+    )
+    
+    (map-set work-version-count
+      { work-id: work-id }
+      { count: new-version-number }
+    )
+    
+    (map-set version-history
+      { author: tx-sender, version-index: author-count }
+      { version-id: version-id }
+    )
+    
+    (map-set author-version-count
+      { author: tx-sender }
+      { count: (+ author-count u1) }
+    )
+    
+    (map-set work-timeline
+      { work-id: work-id, timeline-index: timeline-count }
+      {
+        event-type: u1,
+        version-id: version-id,
+        timestamp: (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))),
+        description: (unwrap-panic (as-max-len? modification-description u200))
+      }
+    )
+    
+    (map-set work-timeline-count
+      { work-id: work-id }
+      { count: (+ timeline-count u1) }
+    )
+    
+    (var-set next-version-id (+ version-id u1))
+    (ok version-id)
+  )
+)
+
+(define-public (register-derivative-work (title (string-ascii 100)) (content-hash (buff 32)) (description (string-utf8 500)) (parent-work-id uint) (derivative-type uint) (attribution-percentage uint) (derivation-description (string-utf8 400)))
+  (let
+    (
+      (parent-work (unwrap! (map-get? works { work-id: parent-work-id }) ERR_INVALID_PARENT_WORK))
+      (work-id (var-get next-work-id))
+      (author tx-sender)
+      (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+      (author-count (default-to u0 (get count (map-get? author-work-count { author: author }))))
+      (parent-genealogy (map-get? work-genealogy { work-id: parent-work-id }))
+      (timeline-count (default-to u0 (get count (map-get? work-timeline-count { work-id: parent-work-id }))))
+    )
+    (asserts! (> (len title) u0) ERR_INVALID_TITLE)
+    (asserts! (is-eq (len content-hash) u32) ERR_INVALID_HASH)
+    (asserts! (and (>= derivative-type u1) (<= derivative-type u5)) ERR_INVALID_MODIFICATION_TYPE)
+    (asserts! (and (> attribution-percentage u0) (<= attribution-percentage u100)) ERR_INVALID_REVENUE_SHARE)
+    (asserts! (is-none (map-get? content-hash-to-work { content-hash: content-hash })) ERR_ALREADY_EXISTS)
+    
+    (unwrap! (register-work title content-hash description) ERR_ALREADY_EXISTS)
+    
+    (map-set derivative-works
+      { derivative-work-id: work-id }
+      {
+        parent-work-id: parent-work-id,
+        derivative-type: derivative-type,
+        attribution-percentage: attribution-percentage,
+        derivation-description: derivation-description,
+        registered-at: current-time,
+        is-approved: false
+      }
+    )
+    
+    (match parent-genealogy
+      genealogy
+        (map-set work-genealogy
+          { work-id: work-id }
+          {
+            root-work-id: (get root-work-id genealogy),
+            parent-work-id: parent-work-id,
+            generation-level: (+ (get generation-level genealogy) u1),
+            total-derivatives: u0,
+            lineage-path: (unwrap-panic (as-max-len? (append (get lineage-path genealogy) parent-work-id) u10))
+          }
+        )
+      (map-set work-genealogy
+        { work-id: work-id }
+        {
+          root-work-id: parent-work-id,
+          parent-work-id: parent-work-id,
+          generation-level: u1,
+          total-derivatives: u0,
+          lineage-path: (list parent-work-id)
+        }
+      )
+    )
+    
+    (map-set work-timeline
+      { work-id: parent-work-id, timeline-index: timeline-count }
+      {
+        event-type: u2,
+        version-id: work-id,
+        timestamp: current-time,
+        description: (unwrap-panic (as-max-len? derivation-description u200))
+      }
+    )
+    
+    (map-set work-timeline-count
+      { work-id: parent-work-id }
+      { count: (+ timeline-count u1) }
+    )
+    
+    (ok work-id)
+  )
+)
+
+(define-public (approve-derivative-work (derivative-work-id uint))
+  (let
+    (
+      (derivative (unwrap! (map-get? derivative-works { derivative-work-id: derivative-work-id }) ERR_NOT_FOUND))
+      (parent-work-id (get parent-work-id derivative))
+      (parent-work (unwrap! (map-get? works { work-id: parent-work-id }) ERR_NOT_FOUND))
+      (parent-author (get author parent-work))
+    )
+    (asserts! (is-eq tx-sender parent-author) ERR_NOT_AUTHORIZED)
+    
+    (map-set derivative-works
+      { derivative-work-id: derivative-work-id }
+      (merge derivative { is-approved: true })
+    )
+    (ok true)
+  )
+)
+
+(define-public (deactivate-version (work-id uint) (version-number uint))
+  (let
+    (
+      (work (unwrap! (map-get? works { work-id: work-id }) ERR_NOT_FOUND))
+      (version (unwrap! (map-get? work-versions { work-id: work-id, version-number: version-number }) ERR_VERSION_NOT_FOUND))
+      (author (get author work))
+    )
+    (asserts! (is-eq tx-sender author) ERR_NOT_AUTHORIZED)
+    
+    (map-set work-versions
+      { work-id: work-id, version-number: version-number }
+      (merge version { is-active: false })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-work-version (work-id uint) (version-number uint))
+  (map-get? work-versions { work-id: work-id, version-number: version-number })
+)
+
+(define-read-only (get-work-version-count (work-id uint))
+  (default-to u0 (get count (map-get? work-version-count { work-id: work-id })))
+)
+
+(define-read-only (get-derivative-work-info (derivative-work-id uint))
+  (map-get? derivative-works { derivative-work-id: derivative-work-id })
+)
+
+(define-read-only (get-work-genealogy (work-id uint))
+  (map-get? work-genealogy { work-id: work-id })
+)
+
+(define-read-only (get-work-timeline-entry (work-id uint) (timeline-index uint))
+  (map-get? work-timeline { work-id: work-id, timeline-index: timeline-index })
+)
+
+(define-read-only (get-work-timeline-count (work-id uint))
+  (default-to u0 (get count (map-get? work-timeline-count { work-id: work-id })))
+)
+
+(define-read-only (get-author-version-count (author principal))
+  (default-to u0 (get count (map-get? author-version-count { author: author })))
+)
+
+(define-read-only (get-author-version-by-index (author principal) (index uint))
+  (match (map-get? version-history { author: author, version-index: index })
+    version-entry (some (get version-id version-entry))
+    none
+  )
+)
+
+(define-read-only (verify-work-lineage (work-id uint) (claimed-root uint))
+  (match (get-work-genealogy work-id)
+    genealogy (is-eq (get root-work-id genealogy) claimed-root)
+    false
+  )
+)
+
+(define-read-only (get-generation-level (work-id uint))
+  (match (get-work-genealogy work-id)
+    genealogy (get generation-level genealogy)
+    u0
+  )
+)
+
+(define-read-only (check-derivative-approval (derivative-work-id uint))
+  (match (get-derivative-work-info derivative-work-id)
+    derivative (get is-approved derivative)
+    false
+  )
+)
+
+(define-read-only (get-work-evolution-stats (work-id uint))
+  {
+    total-versions: (get-work-version-count work-id),
+    timeline-events: (get-work-timeline-count work-id),
+    generation-level: (get-generation-level work-id),
+    has-derivatives: (> (match (get-work-genealogy work-id) genealogy (get total-derivatives genealogy) u0) u0)
+  }
+)
+
+(define-read-only (compare-versions (work-id uint) (version-a uint) (version-b uint))
+  (let
+    (
+      (version-a-data (get-work-version work-id version-a))
+      (version-b-data (get-work-version work-id version-b))
+    )
+    (match version-a-data
+      va (match version-b-data
+        vb (some {
+          version-a-hash: (get content-hash va),
+          version-b-hash: (get content-hash vb),
+          time-difference: (if (> (get timestamp va) (get timestamp vb)) (- (get timestamp va) (get timestamp vb)) (- (get timestamp vb) (get timestamp va))),
+          modification-types: { a: (get modification-type va), b: (get modification-type vb) },
+          same-author: (is-eq (get author va) (get author vb))
+        })
+        none
+      )
+      none
+    )
+  )
+)
+
+
+
